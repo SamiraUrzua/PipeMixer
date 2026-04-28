@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import threading
 import time
@@ -13,7 +14,7 @@ IGNORED_MEDIA_CLASSES = {"Midi/Bridge", "Video/Source", "Video/Sink"}
 IGNORED_NODE_NAMES    = {"Dummy-Driver", "Freewheel-Driver", "Midi-Bridge"}
 IGNORED_CLIENT_NAMES  = {"WirePlumber", "pipewire", "speech-dispatcher-dummy"}
 
-POLL_INTERVAL = 0.5
+POLL_INTERVAL = 1.0
 
 
 def _run(cmd: list[str]) -> str:
@@ -174,9 +175,13 @@ class PipewireManager:
 
             vol_props = obj.get("info", {}).get("params", {}).get("Props", [{}])[0]
 
+            node_name = props.get("node.name", "")
+            description = props.get("node.description", node_name)
+
             outputs.append(Output(
                 id=obj["id"],
-                name=props.get("node.name", ""),
+                name=node_name,
+                display_name=description,
                 volume=_avg(vol_props.get("channelVolumes", [1.0])),
                 muted=vol_props.get("mute", False),
                 is_virtual=props.get("node.virtual", False),
@@ -199,16 +204,74 @@ class PipewireManager:
         for node_id in inp.node_ids:
             self.set_mute(node_id, muted)
 
-    def create_virtual_sink(self, name: str) -> int:
-        output = _run([
-            "pactl", "load-module", "module-null-sink",
-            f"sink_name={name}",
-            f"sink_properties=node.description={name}",
+    def set_node_description(self, node_name: str, new_display_name: str) -> None:
+        self.destroy_virtual_sink(node_name)
+        conf_dir = os.path.expanduser("~/.config/pipewire/pipewire.conf.d")
+        conf_path = os.path.join(conf_dir, f"pipemixer-{node_name}.conf")
+        with open(conf_path, "w") as f:
+            f.write(
+                f'context.objects = [\n'
+                f'  {{\n'
+                f'    factory = adapter\n'
+                f'    args = {{\n'
+                f'      factory.name     = support.null-audio-sink\n'
+                f'      node.name        = {node_name}\n'
+                f'      node.description = "{new_display_name}"\n'
+                f'      media.class      = Audio/Sink\n'
+                f'      object.linger    = true\n'
+                f'    }}\n'
+                f'  }}\n'
+                f']\n'
+            )
+        _run([
+            "pw-cli", "create-node", "adapter",
+            f'{{ factory.name=support.null-audio-sink node.name={node_name} '
+            f'node.description="{new_display_name}" media.class=Audio/Sink object.linger=true }}',
         ])
-        return int(output.strip())
 
-    def destroy_virtual_sink(self, module_id: int) -> None:
-        _run(["pactl", "unload-module", str(module_id)])
+    def create_virtual_sink(self, display_name: str) -> tuple[str, None]:
+        sink_name = "".join(c if c.isalnum() else "_" for c in display_name)
+        conf_dir = os.path.expanduser("~/.config/pipewire/pipewire.conf.d")
+        os.makedirs(conf_dir, exist_ok=True)
+        conf_path = os.path.join(conf_dir, f"pipemixer-{sink_name}.conf")
+        with open(conf_path, "w") as f:
+            f.write(
+                f'context.objects = [\n'
+                f'  {{\n'
+                f'    factory = adapter\n'
+                f'    args = {{\n'
+                f'      factory.name     = support.null-audio-sink\n'
+                f'      node.name        = {sink_name}\n'
+                f'      node.description = "{display_name}"\n'
+                f'      media.class      = Audio/Sink\n'
+                f'      object.linger    = true\n'
+                f'    }}\n'
+                f'  }}\n'
+                f']\n'
+            )
+        _run([
+            "pw-cli", "create-node", "adapter",
+            f'{{ factory.name=support.null-audio-sink node.name={sink_name} '
+            f'node.description="{display_name}" media.class=Audio/Sink object.linger=true }}',
+        ])
+        return sink_name, None
+
+    def destroy_virtual_sink(self, sink_name: str) -> None:
+        conf_path = os.path.expanduser(
+            f"~/.config/pipewire/pipewire.conf.d/pipemixer-{sink_name}.conf"
+        )
+        if os.path.exists(conf_path):
+            os.remove(conf_path)
+        objects = self._get_objects()
+        for obj in objects:
+            if obj.get("type") != "PipeWire:Interface:Node":
+                continue
+            if obj.get("info", {}).get("props", {}).get("node.name") == sink_name:
+                try:
+                    _run(["pw-cli", "destroy", str(obj["id"])])
+                except RuntimeError:
+                    pass
+                break
 
     def link_nodes(self, output_node_name: str, input_node_name: str) -> None:
         _run(["pw-link", output_node_name, input_node_name])
@@ -238,12 +301,12 @@ class PWMonitor(QThread):
                 )
                 if result.returncode == 0:
                     objects = _parse_dump(result.stdout)
-                    self._cache._update(objects)
-
-                    h = _snapshot_hash(objects)
-                    if h != self._last_hash:
-                        self._last_hash = h
-                        self.graph_changed.emit()
+                    if objects:
+                        self._cache._update(objects)
+                        h = _snapshot_hash(objects)
+                        if h != self._last_hash:
+                            self._last_hash = h
+                            self.graph_changed.emit()
 
             except Exception:
                 pass

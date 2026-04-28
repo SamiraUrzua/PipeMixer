@@ -21,10 +21,12 @@ def save(inputs: list[Input], outputs: list[Output]) -> None:
         "outputs": [
             {
                 "name": o.name,
+                "display_name": o.display_name,
                 "volume": o.volume,
                 "muted": o.muted,
                 "module_id": o.module_id,
                 "auto_route": o.auto_route,
+                "is_virtual": o.is_virtual,
                 "links": [
                     {"input_name": l.input_name, "volume": l.volume, "muted": l.muted}
                     for l in o.links
@@ -43,6 +45,8 @@ def load() -> tuple[list[dict], list[dict]]:
     try:
         with open(STATE_PATH) as f:
             data = json.load(f)
-        return data.get("inputs", []), data.get("outputs", [])
+        inputs  = [i for i in data.get("inputs", [])  if isinstance(i.get("name"), str)]
+        outputs = [o for o in data.get("outputs", []) if isinstance(o.get("name"), str)]
+        return inputs, outputs
     except Exception:
         return [], []

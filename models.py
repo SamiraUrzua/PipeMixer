@@ -30,3 +30,4 @@ class Output(Device):
     links: list[Link] = field(default_factory=list)
     module_id: int | None = None
     auto_route: bool = False
+    display_name: str = ""

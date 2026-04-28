@@ -186,14 +186,16 @@ class DeviceWidget(QWidget):
 
         new_name = self._rename_edit.text().strip()
 
+        self._rename_edit.hide()
+        self._label.show()
+
         if not new_name:
+            if self._is_output and self._device.is_virtual:
+                return
             new_name = self._device.display_name or self._device.name
 
         self._label.setText(new_name)
         self.rename_requested.emit(self._persisted_name, new_name)
-
-        self._rename_edit.hide()
-        self._label.show()
 
     def _rebuild_links(self):
         while self._links_layout.count():

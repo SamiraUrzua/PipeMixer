@@ -1,12 +1,13 @@
 from pipewire_manager import PipewireManager
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QPushButton, QFrame
+    QLabel, QPushButton
 )
 from PySide6.QtCore import Qt
 from models import Input, Output
 from device_widget import DeviceWidget
 from input_dialog import InputDialog
+from output_dialog import OutputDialog
 import store
 
 
@@ -27,14 +28,16 @@ class MainWindow(QMainWindow):
         self._pw = cache
         self._monitor = monitor
 
-        self._input_widgets: dict[str, DeviceWidget] = {}
-        self._output_widgets: dict[int, DeviceWidget] = {}
+        self._input_widgets:  dict[str, DeviceWidget] = {}
+        self._output_widgets: dict[str, DeviceWidget] = {}
 
         saved_inputs, saved_outputs = store.load()
-        self._persisted_inputs: list[dict] = saved_inputs
+        self._persisted_inputs:  list[dict] = saved_inputs
+        self._persisted_outputs: list[dict] = saved_outputs
 
         self._build()
         self._build_input_widgets()
+        self._build_output_widgets()
 
         self._monitor.graph_changed.connect(self._refresh)
 
@@ -46,32 +49,24 @@ class MainWindow(QMainWindow):
         inputs_panel = QWidget()
         inputs_layout = QVBoxLayout(inputs_panel)
         inputs_layout.setAlignment(Qt.AlignTop)
-
         inputs_layout.addWidget(QLabel("Inputs"))
-
         self._inputs_container = QWidget()
         self._inputs_layout = QVBoxLayout(self._inputs_container)
         self._inputs_layout.setAlignment(Qt.AlignTop)
-
         add_input_btn = QPushButton("+ Add input")
         add_input_btn.clicked.connect(self._add_input)
-
         inputs_layout.addWidget(self._inputs_container)
         inputs_layout.addWidget(add_input_btn)
 
         outputs_panel = QWidget()
         outputs_layout = QVBoxLayout(outputs_panel)
         outputs_layout.setAlignment(Qt.AlignTop)
-
         outputs_layout.addWidget(QLabel("Outputs"))
-
         self._outputs_container = QWidget()
         self._outputs_layout = QVBoxLayout(self._outputs_container)
         self._outputs_layout.setAlignment(Qt.AlignTop)
-
-        add_output_btn = QPushButton("+ Add virtual output")
-        add_output_btn.clicked.connect(self._add_virtual_output)
-
+        add_output_btn = QPushButton("+ Add output")
+        add_output_btn.clicked.connect(self._add_output)
         outputs_layout.addWidget(self._outputs_container)
         outputs_layout.addWidget(add_output_btn)
 
@@ -82,9 +77,12 @@ class MainWindow(QMainWindow):
         for saved in self._persisted_inputs:
             self._create_input_widget(saved)
 
+    def _build_output_widgets(self):
+        for saved in self._persisted_outputs:
+            self._create_output_widget(saved)
+
     def _create_input_widget(self, saved: dict):
         name = saved["name"]
-
         node = Input(
             id=-1,
             name=name,
@@ -96,7 +94,6 @@ class MainWindow(QMainWindow):
             binary=saved.get("binary", ""),
             display_name=saved.get("display_name", name),
         )
-
         widget = DeviceWidget(node)
         widget.volume_changed.connect(
             lambda nid, vol, i=node: self._pw.set_input_volume(i, vol)
@@ -106,86 +103,47 @@ class MainWindow(QMainWindow):
         )
         widget.remove_requested.connect(self._remove_input)
         widget.rename_requested.connect(self._rename_input)
-
         self._inputs_layout.addWidget(widget)
         self._input_widgets[name] = widget
         widget.set_available(False)
 
-    def _add_input(self):
-        discovered = self._pw.discover_inputs()
-        already_added = [p["name"] for p in self._persisted_inputs]
-
-        dialog = InputDialog(discovered, already_added, self)
-        if dialog.exec():
-            selected = dialog.selected_input()
-            if not selected:
-                return
-
-            saved = {
-                "name": selected.name,
-                "binary": selected.binary,
-                "display_name": selected.display_name,
-                "volume": selected.volume,
-                "muted": selected.muted,
-            }
-
-            self._persisted_inputs.append(saved)
-            self._create_input_widget(saved)
-            self._sync_input_availability(self._pw.discover_inputs())
-
-    def _remove_input(self, name: str):
-        self._persisted_inputs = [
-            p for p in self._persisted_inputs if p["name"] != name
-        ]
-
-        if name in self._input_widgets:
-            self._input_widgets.pop(name).deleteLater()
-
-        self._save()
-
-    def _rename_input(self, internal_name: str, new_display_name: str):
-        for p in self._persisted_inputs:
-            if p["name"] == internal_name:
-                p["display_name"] = new_display_name
-                break
-        self._save()
-
-    def _sync_outputs(self, outputs: list[Output]):
-        current_ids = {o.id for o in outputs}
-
-        for node_id in set(self._output_widgets) - current_ids:
-            self._output_widgets.pop(node_id).deleteLater()
-
-        existing_names = {w._device.name for w in self._output_widgets.values()}
-
-        for out in outputs:
-            if out.id in self._output_widgets:
-                self._output_widgets[out.id].refresh(out)
-            elif out.name not in existing_names:
-                widget = DeviceWidget(out)
-                widget.volume_changed.connect(self._pw.set_volume)
-                widget.mute_toggled.connect(self._pw.set_mute)
-                widget.auto_route_toggled.connect(self._on_auto_route)
-                widget.link_volume_changed.connect(self._on_link_volume)
-                widget.link_mute_toggled.connect(self._on_link_mute)
-
-                self._outputs_layout.addWidget(widget)
-                self._output_widgets[out.id] = widget
+    def _create_output_widget(self, saved: dict):
+        name = saved["name"]
+        node = Output(
+            id=-1,
+            name=name,
+            display_name=saved.get("display_name", name),
+            volume=saved.get("volume", 1.0),
+            muted=saved.get("muted", False),
+            is_virtual=saved.get("is_virtual", False),
+            module_id=saved.get("module_id"),
+            auto_route=saved.get("auto_route", False),
+        )
+        widget = DeviceWidget(node)
+        widget.volume_changed.connect(self._pw.set_volume)
+        widget.mute_toggled.connect(self._pw.set_mute)
+        widget.auto_route_toggled.connect(self._on_auto_route)
+        widget.link_volume_changed.connect(self._on_link_volume)
+        widget.link_mute_toggled.connect(self._on_link_mute)
+        widget.remove_requested.connect(self._remove_output)
+        widget.rename_requested.connect(self._rename_output)
+        self._outputs_layout.addWidget(widget)
+        self._output_widgets[name] = widget
+        widget.set_available(False)
 
     def _refresh(self):
         discovered = self._pw.discover_inputs()
-        outputs = self._pw.read_outputs()
-
+        outputs    = self._pw.read_outputs()
         self._sync_input_availability(discovered)
-        self._sync_outputs(outputs)
+        self._sync_output_availability(outputs)
         self._save()
 
     def _sync_input_availability(self, discovered: list[Input]):
-        by_name = {i.name: i for i in discovered}
+        by_name   = {i.name: i for i in discovered}
         by_binary = {i.binary: i for i in discovered if i.binary}
 
         for saved in self._persisted_inputs:
-            name = saved["name"]
+            name   = saved["name"]
             binary = saved.get("binary", "")
             widget = self._input_widgets.get(name)
             if not widget:
@@ -196,18 +154,141 @@ class MainWindow(QMainWindow):
             if node:
                 widget.volume_changed.disconnect()
                 widget.mute_toggled.disconnect()
-
                 widget.volume_changed.connect(
                     lambda nid, vol, i=node: self._pw.set_input_volume(i, vol)
                 )
                 widget.mute_toggled.connect(
                     lambda nid, muted, i=node: self._pw.set_input_mute(i, muted)
                 )
-
                 widget.refresh(node)
                 widget.set_available(True)
             else:
                 widget.set_available(False)
+
+    def _sync_output_availability(self, outputs: list[Output]):
+        by_name = {o.name: o for o in outputs}
+
+        for saved in self._persisted_outputs:
+            name   = saved["name"]
+            widget = self._output_widgets.get(name)
+            if not widget:
+                continue
+
+            node = by_name.get(name)
+
+            if node:
+                widget.volume_changed.disconnect()
+                widget.mute_toggled.disconnect()
+                widget.volume_changed.connect(self._pw.set_volume)
+                widget.mute_toggled.connect(self._pw.set_mute)
+                widget.refresh(node)
+                widget.set_available(True)
+            else:
+                widget.set_available(False)
+
+    def _add_input(self):
+        discovered    = self._pw.discover_inputs()
+        already_added = [p["name"] for p in self._persisted_inputs]
+        dialog = InputDialog(discovered, already_added, self)
+        if not dialog.exec():
+            return
+        selected = dialog.selected_input()
+        if not selected:
+            return
+        saved = {
+            "name":         selected.name,
+            "binary":       selected.binary,
+            "display_name": selected.display_name,
+            "volume":       selected.volume,
+            "muted":        selected.muted,
+        }
+        self._persisted_inputs.append(saved)
+        self._create_input_widget(saved)
+        self._sync_input_availability(self._pw.discover_inputs())
+
+    def _add_output(self):
+        discovered    = self._pw.read_outputs()
+        already_added = [p["name"] for p in self._persisted_outputs]
+        dialog = OutputDialog(discovered, already_added, self)
+        if not dialog.exec():
+            return
+
+        if dialog.result_virtual_name() is not None:
+            display_name = dialog.result_virtual_name()
+            try:
+                sink_name, _ = self._pw.create_virtual_sink(display_name)
+            except RuntimeError:
+                return
+            saved = {
+                "name":         sink_name,
+                "display_name": display_name,
+                "volume":       1.0,
+                "muted":        False,
+                "is_virtual":   True,
+                "module_id":    None,
+                "auto_route":   False,
+            }
+            self._persisted_outputs.append(saved)
+            self._create_output_widget(saved)
+            self._output_widgets[sink_name].set_available(True)
+
+        elif dialog.result_hardware() is not None:
+            out = dialog.result_hardware()
+            saved = {
+                "name":         out.name,
+                "display_name": out.display_name,
+                "volume":       out.volume,
+                "muted":        out.muted,
+                "is_virtual":   False,
+                "module_id":    None,
+                "auto_route":   False,
+            }
+            self._persisted_outputs.append(saved)
+            self._create_output_widget(saved)
+            self._sync_output_availability(self._pw.read_outputs())
+
+        self._save()
+
+    def _remove_input(self, name: str):
+        self._persisted_inputs = [
+            p for p in self._persisted_inputs if p["name"] != name
+        ]
+        if name in self._input_widgets:
+            self._input_widgets.pop(name).deleteLater()
+        self._save()
+
+    def _remove_output(self, name: str):
+        saved = next((p for p in self._persisted_outputs if p["name"] == name), None)
+        if saved and saved.get("is_virtual"):
+            try:
+                self._pw.destroy_virtual_sink(saved["name"])
+            except RuntimeError:
+                pass
+        self._persisted_outputs = [
+            p for p in self._persisted_outputs if p["name"] != name
+        ]
+        if name in self._output_widgets:
+            self._output_widgets.pop(name).deleteLater()
+        self._save()
+
+    def _rename_input(self, internal_name: str, new_display_name: str):
+        for p in self._persisted_inputs:
+            if p["name"] == internal_name:
+                p["display_name"] = new_display_name
+                break
+        self._save()
+
+    def _rename_output(self, internal_name: str, new_display_name: str):
+        for p in self._persisted_outputs:
+            if p["name"] == internal_name:
+                if p.get("is_virtual") and new_display_name != p.get("display_name"):
+                    try:
+                        self._pw.set_node_description(internal_name, new_display_name)
+                    except RuntimeError:
+                        pass
+                p["display_name"] = new_display_name
+                break
+        self._save()
 
     def _save(self):
         inputs_to_save = [
@@ -224,10 +305,20 @@ class MainWindow(QMainWindow):
             )
             for p in self._persisted_inputs
         ]
-
-        ordered_outputs = get_widgets(self._outputs_layout)
-
-        store.save(inputs_to_save, [w._device for w in ordered_outputs])
+        outputs_to_save = [
+            Output(
+                id=-1,
+                name=p["name"],
+                display_name=p.get("display_name", p["name"]),
+                volume=p.get("volume", 1.0),
+                muted=p.get("muted", False),
+                is_virtual=p.get("is_virtual", False),
+                module_id=p.get("module_id"),
+                auto_route=p.get("auto_route", False),
+            )
+            for p in self._persisted_outputs
+        ]
+        store.save(inputs_to_save, outputs_to_save)
 
     def _on_auto_route(self, output_id: int, enabled: bool):
         pass
@@ -236,9 +327,6 @@ class MainWindow(QMainWindow):
         pass
 
     def _on_link_mute(self, output_id: int, input_name: str, muted: bool):
-        pass
-
-    def _add_virtual_output(self):
         pass
 
     def closeEvent(self, event):
