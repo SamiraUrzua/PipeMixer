@@ -163,9 +163,9 @@ class DeviceWidget(QWidget):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.MouseButtonPress:
             if self._rename_edit.isVisible():
-                if not self._rename_edit.geometry().contains(
-                    self._rename_edit.mapFrom(self, event.globalPosition().toPoint() - self.pos())
-                ):
+                global_pos = event.globalPosition().toPoint()
+                local_pos  = self._rename_edit.mapFromGlobal(global_pos)
+                if not self._rename_edit.rect().contains(local_pos):
                     self._on_rename_confirm()
                     QApplication.instance().removeEventFilter(self)
         return False
