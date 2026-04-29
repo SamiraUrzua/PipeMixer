@@ -14,7 +14,7 @@ IGNORED_MEDIA_CLASSES = {"Midi/Bridge", "Video/Source", "Video/Sink"}
 IGNORED_NODE_NAMES    = {"Dummy-Driver", "Freewheel-Driver", "Midi-Bridge"}
 IGNORED_CLIENT_NAMES  = {"WirePlumber", "pipewire", "speech-dispatcher-dummy"}
 
-POLL_INTERVAL = 1.0
+POLL_INTERVAL = 0.1
 
 
 def _run(cmd: list[str]) -> str:
@@ -25,11 +25,22 @@ def _run(cmd: list[str]) -> str:
 
 
 def _parse_dump(raw: str) -> list:
-    text = raw.strip()
-    last_bracket = text.rfind("\n[")
-    if last_bracket != -1:
-        text = text[last_bracket:].strip()
-    return json.loads(text)
+    arrays = []
+    for part in raw.strip().split("\n["):
+        text = part if part.startswith("[") else "[" + part
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                arrays.append(parsed)
+        except json.JSONDecodeError:
+            pass
+
+    for candidate in reversed(arrays):
+        objects = [o for o in candidate if isinstance(o, dict)]
+        if any(o.get("type") == "PipeWire:Interface:Core" for o in objects):
+            return objects
+
+    return []
 
 
 def _avg(channel_volumes: list[float]) -> float:
@@ -168,7 +179,7 @@ class PipewireManager:
             props       = obj.get("info", {}).get("props", {})
             media_class = props.get("media.class", "")
 
-            if media_class != "Audio/Sink":
+            if media_class not in ("Audio/Sink", "Audio/Source/Virtual"):
                 continue
             if props.get("node.name") in IGNORED_NODE_NAMES:
                 continue
@@ -204,9 +215,9 @@ class PipewireManager:
         for node_id in inp.node_ids:
             self.set_mute(node_id, muted)
 
-    def set_node_description(self, node_name: str, new_display_name: str) -> None:
-        self.destroy_virtual_sink(node_name)
+    def _write_virtual_mic_conf(self, node_name: str, display_name: str) -> None:
         conf_dir = os.path.expanduser("~/.config/pipewire/pipewire.conf.d")
+        os.makedirs(conf_dir, exist_ok=True)
         conf_path = os.path.join(conf_dir, f"pipemixer-{node_name}.conf")
         with open(conf_path, "w") as f:
             f.write(
@@ -216,49 +227,46 @@ class PipewireManager:
                 f'    args = {{\n'
                 f'      factory.name     = support.null-audio-sink\n'
                 f'      node.name        = {node_name}\n'
-                f'      node.description = "{new_display_name}"\n'
-                f'      media.class      = Audio/Sink\n'
+                f'      node.description = "{display_name}"\n'
+                f'      media.class      = Audio/Source/Virtual\n'
                 f'      object.linger    = true\n'
                 f'    }}\n'
                 f'  }}\n'
                 f']\n'
             )
+
+    def create_virtual_mic(self, display_name: str) -> str:
+        base_name = "".join(c if c.isalnum() else "_" for c in display_name)
+        existing = {
+            obj.get("info", {}).get("props", {}).get("node.name")
+            for obj in self._get_objects()
+            if obj.get("type") == "PipeWire:Interface:Node"
+        }
+        node_name = base_name
+        counter = 2
+        while node_name in existing:
+            node_name = f"{base_name}_{counter}"
+            counter += 1
+        self._write_virtual_mic_conf(node_name, display_name)
         _run([
             "pw-cli", "create-node", "adapter",
             f'{{ factory.name=support.null-audio-sink node.name={node_name} '
-            f'node.description="{new_display_name}" media.class=Audio/Sink object.linger=true }}',
+            f'node.description="{display_name}" media.class=Audio/Source/Virtual object.linger=true }}',
         ])
+        return node_name
 
-    def create_virtual_sink(self, display_name: str) -> tuple[str, None]:
-        sink_name = "".join(c if c.isalnum() else "_" for c in display_name)
-        conf_dir = os.path.expanduser("~/.config/pipewire/pipewire.conf.d")
-        os.makedirs(conf_dir, exist_ok=True)
-        conf_path = os.path.join(conf_dir, f"pipemixer-{sink_name}.conf")
-        with open(conf_path, "w") as f:
-            f.write(
-                f'context.objects = [\n'
-                f'  {{\n'
-                f'    factory = adapter\n'
-                f'    args = {{\n'
-                f'      factory.name     = support.null-audio-sink\n'
-                f'      node.name        = {sink_name}\n'
-                f'      node.description = "{display_name}"\n'
-                f'      media.class      = Audio/Sink\n'
-                f'      object.linger    = true\n'
-                f'    }}\n'
-                f'  }}\n'
-                f']\n'
-            )
+    def rename_virtual_mic(self, node_name: str, new_display_name: str) -> None:
+        self.destroy_virtual_mic(node_name)
+        self._write_virtual_mic_conf(node_name, new_display_name)
         _run([
             "pw-cli", "create-node", "adapter",
-            f'{{ factory.name=support.null-audio-sink node.name={sink_name} '
-            f'node.description="{display_name}" media.class=Audio/Sink object.linger=true }}',
+            f'{{ factory.name=support.null-audio-sink node.name={node_name} '
+            f'node.description="{new_display_name}" media.class=Audio/Source/Virtual object.linger=true }}',
         ])
-        return sink_name, None
 
-    def destroy_virtual_sink(self, sink_name: str) -> None:
+    def destroy_virtual_mic(self, node_name: str) -> None:
         conf_path = os.path.expanduser(
-            f"~/.config/pipewire/pipewire.conf.d/pipemixer-{sink_name}.conf"
+            f"~/.config/pipewire/pipewire.conf.d/pipemixer-{node_name}.conf"
         )
         if os.path.exists(conf_path):
             os.remove(conf_path)
@@ -266,7 +274,7 @@ class PipewireManager:
         for obj in objects:
             if obj.get("type") != "PipeWire:Interface:Node":
                 continue
-            if obj.get("info", {}).get("props", {}).get("node.name") == sink_name:
+            if obj.get("info", {}).get("props", {}).get("node.name") == node_name:
                 try:
                     _run(["pw-cli", "destroy", str(obj["id"])])
                 except RuntimeError:
@@ -299,7 +307,9 @@ class PWMonitor(QThread):
                     ["pw-dump"],
                     capture_output=True, text=True, timeout=5,
                 )
-                if result.returncode == 0:
+                if result.returncode != 0:
+                    print(f"[PWMonitor] pw-dump failed (code {result.returncode}): {result.stderr.strip()}", flush=True)
+                else:
                     objects = _parse_dump(result.stdout)
                     if objects:
                         self._cache._update(objects)
@@ -308,8 +318,8 @@ class PWMonitor(QThread):
                             self._last_hash = h
                             self.graph_changed.emit()
 
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[PWMonitor] unexpected error: {e}", flush=True)
 
             time.sleep(POLL_INTERVAL)
 

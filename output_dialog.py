@@ -17,7 +17,7 @@ class OutputDialog(QDialog):
         layout = QVBoxLayout(self)
 
         type_row = QHBoxLayout()
-        self._virtual_btn = QPushButton("Virtual")
+        self._virtual_btn = QPushButton("Virtual Mic")
         self._virtual_btn.setCheckable(True)
         self._virtual_btn.setChecked(True)
         self._hardware_btn = QPushButton("Hardware")
@@ -32,8 +32,8 @@ class OutputDialog(QDialog):
 
         virtual_page = QWidget()
         virtual_layout = QVBoxLayout(virtual_page)
-        virtual_layout.addWidget(QLabel("Name"))
-        self._virtual_name_edit = QLineEdit("PipeMixer Out")
+        virtual_layout.addWidget(QLabel("Mic name"))
+        self._virtual_name_edit = QLineEdit("PipeMixer Mic")
         self._virtual_name_edit.selectAll()
         virtual_layout.addWidget(self._virtual_name_edit)
         self._stack.addWidget(virtual_page)

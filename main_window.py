@@ -216,11 +216,11 @@ class MainWindow(QMainWindow):
         if dialog.result_virtual_name() is not None:
             display_name = dialog.result_virtual_name()
             try:
-                sink_name, _ = self._pw.create_virtual_sink(display_name)
+                node_name = self._pw.create_virtual_mic(display_name)
             except RuntimeError:
                 return
             saved = {
-                "name":         sink_name,
+                "name":         node_name,
                 "display_name": display_name,
                 "volume":       1.0,
                 "muted":        False,
@@ -230,7 +230,7 @@ class MainWindow(QMainWindow):
             }
             self._persisted_outputs.append(saved)
             self._create_output_widget(saved)
-            self._output_widgets[sink_name].set_available(True)
+            self._output_widgets[node_name].set_available(True)
 
         elif dialog.result_hardware() is not None:
             out = dialog.result_hardware()
@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
         saved = next((p for p in self._persisted_outputs if p["name"] == name), None)
         if saved and saved.get("is_virtual"):
             try:
-                self._pw.destroy_virtual_sink(saved["name"])
+                self._pw.destroy_virtual_mic(name)
             except RuntimeError:
                 pass
         self._persisted_outputs = [
@@ -283,7 +283,7 @@ class MainWindow(QMainWindow):
             if p["name"] == internal_name:
                 if p.get("is_virtual") and new_display_name != p.get("display_name"):
                     try:
-                        self._pw.set_node_description(internal_name, new_display_name)
+                        self._pw.rename_virtual_mic(internal_name, new_display_name)
                     except RuntimeError:
                         pass
                 p["display_name"] = new_display_name
