@@ -137,6 +137,10 @@ class PipewireManager:
 
             if media_class == "Audio/Source":
                 description = props.get("node.description", node_name)
+                if "usb" in node_name and "cam" in node_name.lower():
+                    icon_name = "camera-web"
+                else:
+                    icon_name = "audio-input-microphone"
                 hardware.append(Input(
                     id=node_id,
                     name=node_name,
@@ -147,10 +151,12 @@ class PipewireManager:
                     node_ids=[node_id],
                     binary="",
                     display_name=description,
+                    icon_name=icon_name,
                 ))
 
             elif media_class == "Stream/Output/Audio":
                 key = binary or client_name
+                icon_name = props.get("application.icon-name", "") or binary or ""
                 if key in streams:
                     streams[key].node_ids.append(node_id)
                 else:
@@ -164,9 +170,52 @@ class PipewireManager:
                         is_virtual=props.get("node.virtual", False),
                         media_class=media_class,
                         node_ids=[node_id],
+                        icon_name=icon_name,
                     )
 
         return hardware + list(streams.values())
+
+    def discover_streams(self) -> list[Input]:
+        objects = self._get_objects()
+        clients = self._client_info(objects)
+        streams = []
+
+        for obj in objects:
+            if obj.get("type") != "PipeWire:Interface:Node":
+                continue
+
+            props       = obj.get("info", {}).get("props", {})
+            media_class = props.get("media.class", "")
+
+            if media_class != "Stream/Output/Audio":
+                continue
+
+            client_id   = props.get("client.id")
+            client      = clients.get(client_id, {})
+            client_name = client.get("name", "")
+            binary      = client.get("binary", "")
+
+            if client_name in IGNORED_CLIENT_NAMES:
+                continue
+
+            vol_props    = obj.get("info", {}).get("params", {}).get("Props", [{}])[0]
+            node_id      = obj["id"]
+            stream_name  = props.get("node.name", "")
+            display_name = props.get("media.name") or props.get("node.description") or f"{client_name} ({binary})"
+
+            streams.append(Input(
+                id=node_id,
+                name=stream_name,
+                display_name=display_name,
+                volume=_avg(vol_props.get("channelVolumes", [1.0])),
+                muted=vol_props.get("mute", False),
+                is_virtual=False,
+                media_class=media_class,
+                node_ids=[node_id],
+                binary=binary,
+            ))
+
+        return streams
 
     def read_outputs(self) -> list[Output]:
         objects = self._get_objects()
@@ -184,10 +233,16 @@ class PipewireManager:
             if props.get("node.name") in IGNORED_NODE_NAMES:
                 continue
 
-            vol_props = obj.get("info", {}).get("params", {}).get("Props", [{}])[0]
-
-            node_name = props.get("node.name", "")
+            vol_props   = obj.get("info", {}).get("params", {}).get("Props", [{}])[0]
+            node_name   = props.get("node.name", "")
             description = props.get("node.description", node_name)
+
+            if media_class == "Audio/Source/Virtual":
+                icon_name = "audio-input-microphone"
+            elif "hdmi" in node_name:
+                icon_name = "video-display"
+            else:
+                icon_name = "audio-headphones"
 
             outputs.append(Output(
                 id=obj["id"],
@@ -196,9 +251,26 @@ class PipewireManager:
                 volume=_avg(vol_props.get("channelVolumes", [1.0])),
                 muted=vol_props.get("mute", False),
                 is_virtual=props.get("node.virtual", False),
+                icon_name=icon_name,
             ))
 
         return outputs
+
+    def read_links(self) -> dict[tuple[int, int], int]:
+        objects = self._get_objects()
+        links = {}
+        for obj in objects:
+            if obj.get("type") != "PipeWire:Interface:Link":
+                continue
+            info     = obj.get("info", {})
+            out_node = info.get("output-node-id")
+            in_node  = info.get("input-node-id")
+            if out_node is not None and in_node is not None:
+                links[(out_node, in_node)] = obj["id"]
+        return links
+
+    def set_link_passive(self, link_id: int, passive: bool) -> None:
+        _run(["pw-metadata", str(link_id), "link.passive", "true" if passive else "false"])
 
     def set_volume(self, node_id: int, volume: float) -> None:
         volume = max(0.0, min(1.5, volume))
@@ -214,6 +286,60 @@ class PipewireManager:
     def set_input_mute(self, inp: Input, muted: bool) -> None:
         for node_id in inp.node_ids:
             self.set_mute(node_id, muted)
+
+    def set_node_target(self, node_id: int, target: str) -> None:
+        _run(["pw-metadata", str(node_id), "target.node", target])
+
+    def read_node_ports(self, node_id: int) -> list[dict]:
+        objects = self._get_objects()
+        ports = []
+        for obj in objects:
+            if obj.get("type") != "PipeWire:Interface:Port":
+                continue
+            props = obj.get("info", {}).get("props", {})
+            if props.get("node.id") != node_id:
+                continue
+            ports.append({
+                "name":      props.get("port.name", ""),
+                "direction": props.get("port.direction", ""),
+                "channel":   props.get("audio.channel", ""),
+            })
+        return ports
+
+    def connect_nodes(self, source_node_name: str, source_node_id: int,
+                      sink_node_name: str, sink_node_id: int) -> None:
+        source_ports = [p for p in self.read_node_ports(source_node_id) if p["direction"] == "out"]
+        sink_ports   = [p for p in self.read_node_ports(sink_node_id)   if p["direction"] == "in"]
+
+        source_channels = [p["channel"] for p in source_ports]
+        sink_channels   = [p["channel"] for p in sink_ports]
+
+        is_mono_source = source_channels == ["MONO"] or (len(source_ports) == 1)
+        is_mono_sink   = sink_channels   == ["MONO"] or (len(sink_ports)   == 1)
+
+        if is_mono_source and not is_mono_sink:
+            mono_port = source_ports[0]["name"]
+            for sink_port in sink_ports:
+                _run(["pw-link",
+                      f"{source_node_name}:{mono_port}",
+                      f"{sink_node_name}:{sink_port['name']}"])
+        elif not is_mono_source and is_mono_sink:
+            mono_port = sink_ports[0]["name"]
+            for source_port in source_ports:
+                _run(["pw-link",
+                      f"{source_node_name}:{source_port['name']}",
+                      f"{sink_node_name}:{mono_port}"])
+        else:
+            by_channel = {p["channel"]: p["name"] for p in sink_ports}
+            for source_port in source_ports:
+                sink_name = by_channel.get(source_port["channel"])
+                if sink_name:
+                    _run(["pw-link",
+                          f"{source_node_name}:{source_port['name']}",
+                          f"{sink_node_name}:{sink_name}"])
+
+    def disconnect_nodes(self, source_node_name: str, sink_node_name: str) -> None:
+        _run(["pw-link", "-d", source_node_name, sink_node_name])
 
     def _write_virtual_mic_conf(self, node_name: str, display_name: str) -> None:
         conf_dir = os.path.expanduser("~/.config/pipewire/pipewire.conf.d")
@@ -280,12 +406,6 @@ class PipewireManager:
                 except RuntimeError:
                     pass
                 break
-
-    def link_nodes(self, output_node_name: str, input_node_name: str) -> None:
-        _run(["pw-link", output_node_name, input_node_name])
-
-    def unlink_nodes(self, output_node_name: str, input_node_name: str) -> None:
-        _run(["pw-link", "-d", output_node_name, input_node_name])
 
 
 class PWMonitor(QThread):

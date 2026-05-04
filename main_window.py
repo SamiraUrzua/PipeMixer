@@ -1,10 +1,11 @@
 from pipewire_manager import PipewireManager
+import subprocess
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton
 )
 from PySide6.QtCore import Qt
-from models import Input, Output
+from models import Input, Output, Link
 from device_widget import DeviceWidget
 from input_dialog import InputDialog
 from output_dialog import OutputDialog
@@ -31,6 +32,8 @@ class MainWindow(QMainWindow):
         self._input_widgets:  dict[str, DeviceWidget] = {}
         self._output_widgets: dict[str, DeviceWidget] = {}
 
+        self._owned_links: set[tuple[str, str]] = set()
+
         saved_inputs, saved_outputs = store.load()
         self._persisted_inputs:  list[dict] = saved_inputs
         self._persisted_outputs: list[dict] = saved_outputs
@@ -53,6 +56,7 @@ class MainWindow(QMainWindow):
         self._inputs_container = QWidget()
         self._inputs_layout = QVBoxLayout(self._inputs_container)
         self._inputs_layout.setAlignment(Qt.AlignTop)
+        self._inputs_layout.setSpacing(8)
         add_input_btn = QPushButton("+ Add input")
         add_input_btn.clicked.connect(self._add_input)
         inputs_layout.addWidget(self._inputs_container)
@@ -65,6 +69,7 @@ class MainWindow(QMainWindow):
         self._outputs_container = QWidget()
         self._outputs_layout = QVBoxLayout(self._outputs_container)
         self._outputs_layout.setAlignment(Qt.AlignTop)
+        self._outputs_layout.setSpacing(8)
         add_output_btn = QPushButton("+ Add output")
         add_output_btn.clicked.connect(self._add_output)
         outputs_layout.addWidget(self._outputs_container)
@@ -72,6 +77,10 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(inputs_panel)
         root_layout.addWidget(outputs_panel)
+
+        restart_btn = QPushButton("Restart PipeWire")
+        restart_btn.clicked.connect(self._restart_pipewire)
+        root_layout.addWidget(restart_btn, alignment=Qt.AlignTop)
 
     def _build_input_widgets(self):
         for saved in self._persisted_inputs:
@@ -123,19 +132,50 @@ class MainWindow(QMainWindow):
         widget.volume_changed.connect(self._pw.set_volume)
         widget.mute_toggled.connect(self._pw.set_mute)
         widget.auto_route_toggled.connect(self._on_auto_route)
-        widget.link_volume_changed.connect(self._on_link_volume)
-        widget.link_mute_toggled.connect(self._on_link_mute)
+        widget.route_add_requested.connect(self._on_route_add_requested)
+        widget.route_toggled.connect(self._on_route_toggled)
+        widget.route_removed.connect(self._on_route_removed)
+        widget.stream_toggled.connect(self._on_stream_toggled)
         widget.remove_requested.connect(self._remove_output)
         widget.rename_requested.connect(self._rename_output)
         self._outputs_layout.addWidget(widget)
         self._output_widgets[name] = widget
         widget.set_available(False)
 
+        for route in saved.get("routes", []):
+            input_name   = route["input_name"]
+            connected    = route.get("connected", True)
+            display_name = self._input_display_name(input_name)
+            widget.add_route(input_name, display_name, connected=connected)
+
+    def _input_display_name(self, input_name: str) -> str:
+        for p in self._persisted_inputs:
+            if p["name"] == input_name:
+                return p.get("display_name", input_name)
+        return input_name
+
+    def _input_node_ids(self, input_name: str) -> list[int]:
+        for p in self._persisted_inputs:
+            if p["name"] != input_name:
+                continue
+            widget = self._input_widgets.get(input_name)
+            if widget:
+                return widget._device.node_ids
+        return []
+
+    def _output_node_name(self, output_name: str) -> str:
+        return output_name
+
     def _refresh(self):
         discovered = self._pw.discover_inputs()
         outputs    = self._pw.read_outputs()
+        live_links = self._pw.read_links()
+        streams    = self._pw.discover_streams()
+
         self._sync_input_availability(discovered)
         self._sync_output_availability(outputs)
+        self._sync_routes(live_links)
+        self._sync_streams(streams)
         self._save()
 
     def _sync_input_availability(self, discovered: list[Input]):
@@ -186,6 +226,262 @@ class MainWindow(QMainWindow):
             else:
                 widget.set_available(False)
 
+    def _sync_routes(self, live_links: dict[tuple[int, int], int]):
+        for saved_out in self._persisted_outputs:
+            output_name   = saved_out["name"]
+            output_widget = self._output_widgets.get(output_name)
+            if not output_widget:
+                continue
+
+            output_node_id = output_widget._device.id
+            if output_node_id == -1:
+                continue
+
+            for route in saved_out.get("routes", []):
+                input_name     = route["input_name"]
+                should_connect = route.get("connected", True)
+                input_widget   = self._input_widgets.get(input_name)
+                if not input_widget:
+                    continue
+
+                for nid in input_widget._device.node_ids:
+                    link_id = live_links.get((nid, output_node_id))
+                    input_node_name = next(
+                        (
+                            obj.get("info", {}).get("props", {}).get("node.name", "")
+                            for obj in self._pw._get_objects()
+                            if obj.get("type") == "PipeWire:Interface:Node"
+                            and obj.get("id") == nid
+                        ),
+                        None
+                    )
+                    if not input_node_name:
+                        continue
+                    if should_connect:
+                        if link_id is not None:
+                            try:
+                                self._pw.set_link_passive(link_id, False)
+                            except RuntimeError:
+                                pass
+                        else:
+                            try:
+                                self._pw.connect_nodes(input_node_name, nid, output_name, output_node_id)
+                            except RuntimeError:
+                                pass
+                    else:
+                        if link_id is not None:
+                            try:
+                                self._pw.disconnect_nodes(input_node_name, output_name)
+                            except RuntimeError:
+                                pass
+
+    def _sync_streams(self, streams: list[Input]):
+        live_links = self._pw.read_links()
+
+        for saved_out in self._persisted_outputs:
+            output_name   = saved_out["name"]
+            output_widget = self._output_widgets.get(output_name)
+            if not output_widget:
+                continue
+
+            if not saved_out.get("auto_route"):
+                output_widget.update_streams([], {})
+                continue
+
+            output_node_id = output_widget._device.id
+            if output_node_id == -1:
+                continue
+
+            stream_states = saved_out.setdefault("stream_states", {})
+
+            for stream in streams:
+                should_connect    = stream_states.get(stream.name, True)
+                already_connected = any(
+                    (nid, output_node_id) in live_links for nid in stream.node_ids
+                )
+                try:
+                    self._pw.set_node_target(stream.id, "-1")
+                except RuntimeError:
+                    pass
+                if should_connect and not already_connected:
+                    try:
+                        self._pw.connect_nodes(stream.name, stream.id, output_name, output_node_id)
+                    except RuntimeError:
+                        pass
+                elif not should_connect and already_connected:
+                    try:
+                        self._pw.disconnect_nodes(stream.name, output_name)
+                    except RuntimeError:
+                        pass
+
+            output_widget.update_streams(streams, stream_states)
+
+    def _on_route_add_requested(self, output_name: str):
+        already_routed = [
+            r["input_name"]
+            for p in self._persisted_outputs
+            if p["name"] == output_name
+            for r in p.get("routes", [])
+        ]
+        dialog = InputDialog(
+            self._pw.discover_inputs(), already_routed, self
+        )
+        if not dialog.exec():
+            return
+        selected = dialog.selected_input()
+        if not selected:
+            return
+
+        for p in self._persisted_outputs:
+            if p["name"] == output_name:
+                live_links     = self._pw.read_links()
+                output_node_id = self._output_widgets[output_name]._device.id
+                connected = any(
+                    (inp_id, output_node_id) in live_links
+                    for inp_id in selected.node_ids
+                ) if output_node_id != -1 else False
+                p.setdefault("routes", []).append({
+                    "input_name": selected.name,
+                    "connected":  connected,
+                })
+                break
+
+        output_widget = self._output_widgets.get(output_name)
+        if output_widget:
+            display_name = self._input_display_name(selected.name)
+            output_widget.add_route(selected.name, display_name, connected=connected)
+
+        self._save()
+
+    def _on_route_toggled(self, output_name: str, input_name: str, connect: bool):
+        for p in self._persisted_outputs:
+            if p["name"] == output_name:
+                for r in p.get("routes", []):
+                    if r["input_name"] == input_name:
+                        r["connected"] = connect
+                        break
+                break
+
+        output_widget = self._output_widgets.get(output_name)
+        input_widget  = self._input_widgets.get(input_name)
+
+        if not output_widget or not input_widget:
+            self._save()
+            return
+
+        output_node_id = output_widget._device.id
+        input_node_ids = input_widget._device.node_ids
+        live_links     = self._pw.read_links()
+
+        for inp_id in input_node_ids:
+            link_id = live_links.get((inp_id, output_node_id))
+            input_node_name = next(
+                (
+                    obj.get("info", {}).get("props", {}).get("node.name", "")
+                    for obj in self._pw._get_objects()
+                    if obj.get("type") == "PipeWire:Interface:Node"
+                    and obj.get("id") == inp_id
+                ),
+                None
+            )
+            if not input_node_name:
+                continue
+            if connect:
+                if link_id is not None:
+                    try:
+                        self._pw.set_link_passive(link_id, False)
+                    except RuntimeError:
+                        pass
+                else:
+                    try:
+                        self._pw.connect_nodes(input_node_name, inp_id, output_name, output_node_id)
+                    except RuntimeError:
+                        pass
+            else:
+                if link_id is not None:
+                    try:
+                        self._pw.disconnect_nodes(input_node_name, output_name)
+                    except RuntimeError:
+                        pass
+
+        self._save()
+
+    def _on_route_removed(self, output_name: str, input_name: str):
+        for p in self._persisted_outputs:
+            if p["name"] == output_name:
+                p["routes"] = [r for r in p.get("routes", []) if r["input_name"] != input_name]
+                break
+
+        output_widget = self._output_widgets.get(output_name)
+        if output_widget:
+            output_widget.remove_route(input_name)
+
+        self._save()
+
+    def _on_stream_toggled(self, output_name: str, stream_name: str, connect: bool):
+        for p in self._persisted_outputs:
+            if p["name"] == output_name:
+                p.setdefault("stream_states", {})[stream_name] = connect
+                break
+
+        output_widget = self._output_widgets.get(output_name)
+        if not output_widget:
+            return
+
+        output_node_id = output_widget._device.id
+        live_links     = self._pw.read_links()
+        streams        = self._pw.discover_streams()
+        stream         = next((s for s in streams if s.name == stream_name), None)
+        if stream is None:
+            return
+
+        for nid in stream.node_ids:
+            link_id = live_links.get((nid, output_node_id))
+            if link_id is not None:
+                try:
+                    self._pw.set_link_passive(link_id, not connect)
+                except RuntimeError:
+                    pass
+            elif connect:
+                try:
+                    self._pw.connect_nodes(stream_name, stream.id, output_name, output_node_id)
+                except RuntimeError:
+                    pass
+
+        self._save()
+
+    def _on_auto_route(self, output_id: int, enabled: bool):
+        for p in self._persisted_outputs:
+            widget = self._output_widgets.get(p["name"])
+            if not widget or widget._device.id != output_id:
+                continue
+            p["auto_route"] = enabled
+            if enabled:
+                streams = self._pw.discover_streams()
+                self._sync_streams(streams)
+            else:
+                output_node_id = widget._device.id
+                live_links     = self._pw.read_links()
+                streams        = self._pw.discover_streams()
+                manually_on    = {r["input_name"] for r in p.get("routes", [])}
+                for stream in streams:
+                    try:
+                        self._pw.set_node_target(stream.id, "")
+                    except RuntimeError:
+                        pass
+                    if stream.name in manually_on:
+                        continue
+                    for nid in stream.node_ids:
+                        link_id = live_links.get((nid, output_node_id))
+                        if link_id is not None:
+                            try:
+                                self._pw.disconnect_nodes(stream.name, p["name"])
+                            except RuntimeError:
+                                pass
+                widget.update_streams([], {})
+            break
+        self._save()
+
     def _add_input(self):
         discovered    = self._pw.discover_inputs()
         already_added = [p["name"] for p in self._persisted_inputs]
@@ -227,6 +523,7 @@ class MainWindow(QMainWindow):
                 "is_virtual":   True,
                 "module_id":    None,
                 "auto_route":   False,
+                "routes":       [],
             }
             self._persisted_outputs.append(saved)
             self._create_output_widget(saved)
@@ -242,6 +539,7 @@ class MainWindow(QMainWindow):
                 "is_virtual":   False,
                 "module_id":    None,
                 "auto_route":   False,
+                "routes":       [],
             }
             self._persisted_outputs.append(saved)
             self._create_output_widget(saved)
@@ -315,19 +613,17 @@ class MainWindow(QMainWindow):
                 is_virtual=p.get("is_virtual", False),
                 module_id=p.get("module_id"),
                 auto_route=p.get("auto_route", False),
+                routes=[
+                    Link(input_name=r["input_name"])
+                    for r in p.get("routes", [])
+                ],
             )
             for p in self._persisted_outputs
         ]
         store.save(inputs_to_save, outputs_to_save)
 
-    def _on_auto_route(self, output_id: int, enabled: bool):
-        pass
-
-    def _on_link_volume(self, output_id: int, input_name: str, volume: float):
-        pass
-
-    def _on_link_mute(self, output_id: int, input_name: str, muted: bool):
-        pass
+    def _restart_pipewire(self):
+        subprocess.run(["systemctl", "--user", "restart", "pipewire"], timeout=5)
 
     def closeEvent(self, event):
         self._monitor.stop()

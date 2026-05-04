@@ -13,8 +13,7 @@ class Device:
 @dataclass
 class Link:
     input_name: str
-    volume: float = 1.0
-    muted: bool = False
+    connected: bool = True
 
 
 @dataclass
@@ -23,11 +22,13 @@ class Input(Device):
     node_ids: list[int] = field(default_factory=list)
     binary: str = ""
     display_name: str = ""
+    icon_name: str = ""
 
 
 @dataclass
 class Output(Device):
-    links: list[Link] = field(default_factory=list)
+    routes: list[Link] = field(default_factory=list)
     module_id: int | None = None
     auto_route: bool = False
     display_name: str = ""
+    icon_name: str = ""

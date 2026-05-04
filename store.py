@@ -10,27 +10,28 @@ def save(inputs: list[Input], outputs: list[Output]) -> None:
     data = {
         "inputs": [
             {
-                "name": i.name,
-                "binary": i.binary,
+                "name":         i.name,
+                "binary":       i.binary,
                 "display_name": i.display_name,
-                "volume": i.volume,
-                "muted": i.muted,
+                "volume":       i.volume,
+                "muted":        i.muted,
             }
             for i in inputs
         ],
         "outputs": [
             {
-                "name": o.name,
+                "name":         o.name,
                 "display_name": o.display_name,
-                "volume": o.volume,
-                "muted": o.muted,
-                "module_id": o.module_id,
-                "auto_route": o.auto_route,
-                "is_virtual": o.is_virtual,
-                "links": [
-                    {"input_name": l.input_name, "volume": l.volume, "muted": l.muted}
-                    for l in o.links
+                "volume":       o.volume,
+                "muted":        o.muted,
+                "module_id":    o.module_id,
+                "auto_route":   o.auto_route,
+                "is_virtual":   o.is_virtual,
+                "routes": [
+                    {"input_name": r.input_name, "connected": r.connected}
+                    for r in o.routes
                 ],
+                "stream_states": getattr(o, "stream_states", {}),
             }
             for o in outputs
         ],
