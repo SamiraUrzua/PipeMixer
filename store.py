@@ -1,43 +1,13 @@
 import json
 import os
-from models import Input, Output, Link
 
 STATE_PATH = os.path.expanduser("~/.config/pipemixer/state.json")
 
 
-def save(inputs: list[Input], outputs: list[Output]) -> None:
+def save(inputs: list[dict], outputs: list[dict]) -> None:
     os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    data = {
-        "inputs": [
-            {
-                "name":         i.name,
-                "binary":       i.binary,
-                "display_name": i.display_name,
-                "volume":       i.volume,
-                "muted":        i.muted,
-            }
-            for i in inputs
-        ],
-        "outputs": [
-            {
-                "name":         o.name,
-                "display_name": o.display_name,
-                "volume":       o.volume,
-                "muted":        o.muted,
-                "module_id":    o.module_id,
-                "auto_route":   o.auto_route,
-                "is_virtual":   o.is_virtual,
-                "routes": [
-                    {"input_name": r.input_name, "connected": r.connected}
-                    for r in o.routes
-                ],
-                "stream_states": getattr(o, "stream_states", {}),
-            }
-            for o in outputs
-        ],
-    }
     with open(STATE_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump({"inputs": inputs, "outputs": outputs}, f, indent=2)
 
 
 def load() -> tuple[list[dict], list[dict]]:
@@ -51,3 +21,26 @@ def load() -> tuple[list[dict], list[dict]]:
         return inputs, outputs
     except Exception:
         return [], []
+
+
+ICON_CACHE_PATH = os.path.expanduser("~/.config/pipemixer/icon_cache.json")
+
+
+def save_icon(key: str, icon_name: str) -> None:
+    cache = load_icon_cache()
+    if cache.get(key) == icon_name:
+        return
+    cache[key] = icon_name
+    os.makedirs(os.path.dirname(ICON_CACHE_PATH), exist_ok=True)
+    with open(ICON_CACHE_PATH, "w") as f:
+        json.dump(cache, f)
+
+
+def load_icon_cache() -> dict[str, str]:
+    if not os.path.exists(ICON_CACHE_PATH):
+        return {}
+    try:
+        with open(ICON_CACHE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}

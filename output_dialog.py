@@ -10,7 +10,8 @@ class OutputDialog(QDialog):
     def __init__(self, available_hardware: list[Output], already_added: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add Output")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(440)
+        self.setMinimumHeight(380)
         self._result_virtual_name: str | None = None
         self._result_hardware: Output | None = None
 
@@ -42,12 +43,14 @@ class OutputDialog(QDialog):
         hardware_layout = QVBoxLayout(hardware_page)
         hardware_layout.addWidget(QLabel("Hardware Outputs"))
         self._hw_list = QListWidget()
+        self._hw_list.setMinimumHeight(200)
         for out in available_hardware:
             if out.name not in already_added:
                 item = QListWidgetItem(out.display_name or out.name)
                 item.setData(Qt.UserRole, out)
                 self._hw_list.addItem(item)
         self._hw_list.itemClicked.connect(self._on_hw_select)
+        self._hw_list.itemDoubleClicked.connect(lambda item: (self._on_hw_select(item), self._on_accept()))
         hardware_layout.addWidget(self._hw_list)
         self._stack.addWidget(hardware_page)
 

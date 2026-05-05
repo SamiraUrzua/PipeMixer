@@ -1,38 +1,39 @@
-from pipewire_manager import PipewireManager
 import subprocess
+from pipewire_manager import PipewireManager
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QPushButton
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QApplication,
+    QLabel, QPushButton, QScrollArea, QFrame, QSizePolicy, QMenu
 )
-from PySide6.QtCore import Qt
-from models import Input, Output, Link
+from PySide6.QtCore import Qt, QTimer, QSettings
+from PySide6.QtGui import QIcon, QAction
+from models import Input, Output
 from device_widget import DeviceWidget
 from input_dialog import InputDialog
 from output_dialog import OutputDialog
 import store
-
-
-def get_widgets(layout: QVBoxLayout) -> list[DeviceWidget]:
-    return [
-        layout.itemAt(i).widget()
-        for i in range(layout.count())
-        if isinstance(layout.itemAt(i).widget(), DeviceWidget)
-    ]
+from store import save_icon, load_icon_cache
 
 
 class MainWindow(QMainWindow):
     def __init__(self, cache: PipewireManager, monitor):
         super().__init__()
         self.setWindowTitle("PipeMixer")
-        self.setMinimumSize(900, 600)
+        app = QApplication.instance()
+        self.setWindowTitle(app.applicationName())
+        self._settings = QSettings("PipeMixer", "PipeMixer")
+        geometry = self._settings.value("window/geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        else:
+            self.setMinimumSize(900, 600)
 
-        self._pw = cache
+        self._pw      = cache
         self._monitor = monitor
 
         self._input_widgets:  dict[str, DeviceWidget] = {}
         self._output_widgets: dict[str, DeviceWidget] = {}
 
-        self._owned_links: set[tuple[str, str]] = set()
+        self._icon_cache: dict[str, str] = load_icon_cache()
 
         saved_inputs, saved_outputs = store.load()
         self._persisted_inputs:  list[dict] = saved_inputs
@@ -43,44 +44,96 @@ class MainWindow(QMainWindow):
         self._build_output_widgets()
 
         self._monitor.graph_changed.connect(self._refresh)
+        QTimer.singleShot(500, self._refresh)
 
     def _build(self):
         root = QWidget()
         self.setCentralWidget(root)
-        root_layout = QHBoxLayout(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        inputs_panel = QWidget()
-        inputs_layout = QVBoxLayout(inputs_panel)
-        inputs_layout.setAlignment(Qt.AlignTop)
-        inputs_layout.addWidget(QLabel("Inputs"))
-        self._inputs_container = QWidget()
-        self._inputs_layout = QVBoxLayout(self._inputs_container)
-        self._inputs_layout.setAlignment(Qt.AlignTop)
-        self._inputs_layout.setSpacing(8)
-        add_input_btn = QPushButton("+ Add input")
-        add_input_btn.clicked.connect(self._add_input)
-        inputs_layout.addWidget(self._inputs_container)
-        inputs_layout.addWidget(add_input_btn)
+        menubar = self.menuBar()
+        settings_menu = QMenu("Settings", self)
+        restart_action = QAction("Restart PipeWire", self)
+        restart_action.triggered.connect(self._restart_pipewire)
+        settings_menu.addAction(restart_action)
+        menubar.addMenu(settings_menu)
 
-        outputs_panel = QWidget()
-        outputs_layout = QVBoxLayout(outputs_panel)
-        outputs_layout.setAlignment(Qt.AlignTop)
-        outputs_layout.addWidget(QLabel("Outputs"))
-        self._outputs_container = QWidget()
-        self._outputs_layout = QVBoxLayout(self._outputs_container)
-        self._outputs_layout.setAlignment(Qt.AlignTop)
-        self._outputs_layout.setSpacing(8)
-        add_output_btn = QPushButton("+ Add output")
-        add_output_btn.clicked.connect(self._add_output)
-        outputs_layout.addWidget(self._outputs_container)
-        outputs_layout.addWidget(add_output_btn)
+        panels_widget = QWidget()
+        panels_layout = QHBoxLayout(panels_widget)
+        panels_layout.setContentsMargins(0, 0, 0, 0)
+        panels_layout.setSpacing(0)
 
-        root_layout.addWidget(inputs_panel)
-        root_layout.addWidget(outputs_panel)
+        panels_layout.addWidget(self._build_panel("Sources", self._add_input, "Add source", "inputs"))
+        separator = QFrame()
+        separator.setObjectName("separator")
+        separator.setFrameShape(QFrame.VLine)
+        separator.setFixedWidth(1)
+        panels_layout.addWidget(separator)
+        panels_layout.addWidget(self._build_panel("Outputs", self._add_output, "Add output", "outputs"))
 
-        restart_btn = QPushButton("Restart PipeWire")
-        restart_btn.clicked.connect(self._restart_pipewire)
-        root_layout.addWidget(restart_btn, alignment=Qt.AlignTop)
+        root_layout.addWidget(panels_widget)
+
+    def _build_panel(self, title: str, add_callback, add_label: str, panel_id: str) -> QWidget:
+        panel = QWidget()
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("panel_header")
+        header.setFixedHeight(44)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(16, 0, 8, 0)
+
+        label = QLabel(title)
+        label.setObjectName("panel_title")
+        header_layout.addWidget(label)
+        header_layout.addStretch()
+
+        add_btn = QPushButton(f"+ {add_label}")
+        add_btn.setObjectName("add_btn")
+        add_btn.clicked.connect(add_callback)
+        header_layout.addWidget(add_btn)
+
+        layout.addWidget(header)
+
+        sep = QFrame()
+        sep.setObjectName("separator")
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(8, 8, 8, 8)
+        container_layout.setSpacing(4)
+        container_layout.setAlignment(Qt.AlignTop)
+        scroll.setWidget(container)
+
+        original_resize = scroll.resizeEvent
+        def constrained_resize(event, s=scroll, c=container):
+            original_resize(event)
+            c.setMaximumWidth(s.viewport().width())
+        scroll.resizeEvent = constrained_resize
+
+        layout.addWidget(scroll)
+
+        if panel_id == "inputs":
+            self._inputs_container = container
+            self._inputs_layout    = container_layout
+        else:
+            self._outputs_container = container
+            self._outputs_layout    = container_layout
+
+        return panel
 
     def _build_input_widgets(self):
         for saved in self._persisted_inputs:
@@ -104,6 +157,9 @@ class MainWindow(QMainWindow):
             display_name=saved.get("display_name", name),
         )
         widget = DeviceWidget(node)
+        cached_icon = self._icon_cache.get(name, "")
+        if cached_icon:
+            widget._update_icon(cached_icon)
         widget.volume_changed.connect(
             lambda nid, vol, i=node: self._pw.set_input_volume(i, vol)
         )
@@ -128,9 +184,10 @@ class MainWindow(QMainWindow):
             module_id=saved.get("module_id"),
             auto_route=saved.get("auto_route", False),
         )
-        widget = DeviceWidget(node)
+        widget = DeviceWidget(node, routes_expanded=saved.get("routes_expanded", True))
         widget.volume_changed.connect(self._pw.set_volume)
         widget.mute_toggled.connect(self._pw.set_mute)
+        widget.collapsed_toggled.connect(self._on_collapsed_toggled)
         widget.auto_route_toggled.connect(self._on_auto_route)
         widget.route_add_requested.connect(self._on_route_add_requested)
         widget.route_toggled.connect(self._on_route_toggled)
@@ -144,9 +201,11 @@ class MainWindow(QMainWindow):
 
         for route in saved.get("routes", []):
             input_name   = route["input_name"]
-            connected    = route.get("connected", True)
+            connected    = route.get("connected", False)
             display_name = self._input_display_name(input_name)
-            widget.add_route(input_name, display_name, connected=connected)
+            available    = input_name in self._input_widgets
+            icon_name    = self._input_icon_name(input_name)
+            widget.add_route(input_name, display_name, connected=connected, available=available, icon_name=icon_name)
 
     def _input_display_name(self, input_name: str) -> str:
         for p in self._persisted_inputs:
@@ -154,17 +213,13 @@ class MainWindow(QMainWindow):
                 return p.get("display_name", input_name)
         return input_name
 
-    def _input_node_ids(self, input_name: str) -> list[int]:
-        for p in self._persisted_inputs:
-            if p["name"] != input_name:
-                continue
-            widget = self._input_widgets.get(input_name)
-            if widget:
-                return widget._device.node_ids
-        return []
-
-    def _output_node_name(self, output_name: str) -> str:
-        return output_name
+    def _input_icon_name(self, input_name: str) -> str:
+        widget = self._input_widgets.get(input_name)
+        if widget:
+            icon = getattr(widget._device, "icon_name", "")
+            if icon:
+                return icon
+        return self._icon_cache.get(input_name, "")
 
     def _refresh(self):
         discovered = self._pw.discover_inputs()
@@ -182,6 +237,8 @@ class MainWindow(QMainWindow):
         by_name   = {i.name: i for i in discovered}
         by_binary = {i.binary: i for i in discovered if i.binary}
 
+        available_names = set()
+
         for saved in self._persisted_inputs:
             name   = saved["name"]
             binary = saved.get("binary", "")
@@ -192,6 +249,11 @@ class MainWindow(QMainWindow):
             node = by_binary.get(binary) or by_name.get(name)
 
             if node:
+                available_names.add(name)
+                icon_name = getattr(node, 'icon_name', '')
+                if icon_name:
+                    self._icon_cache[name] = icon_name
+                    save_icon(name, icon_name)
                 widget.volume_changed.disconnect()
                 widget.mute_toggled.disconnect()
                 widget.volume_changed.connect(
@@ -203,7 +265,16 @@ class MainWindow(QMainWindow):
                 widget.refresh(node)
                 widget.set_available(True)
             else:
+                cached_icon = self._icon_cache.get(name, "")
+                if cached_icon:
+                    widget._update_icon(cached_icon)
                 widget.set_available(False)
+
+        for output_widget in self._output_widgets.values():
+            for input_name in output_widget._route_rows:
+                output_widget.update_route_availability(
+                    input_name, input_name in available_names
+                )
 
     def _sync_output_availability(self, outputs: list[Output]):
         by_name = {o.name: o for o in outputs}
@@ -239,7 +310,7 @@ class MainWindow(QMainWindow):
 
             for route in saved_out.get("routes", []):
                 input_name     = route["input_name"]
-                should_connect = route.get("connected", True)
+                should_connect = route.get("connected", False)
                 input_widget   = self._input_widgets.get(input_name)
                 if not input_widget:
                     continue
@@ -324,7 +395,23 @@ class MainWindow(QMainWindow):
             for r in p.get("routes", [])
         ]
         dialog = InputDialog(
-            self._pw.discover_inputs(), already_routed, self
+            [
+                Input(
+                    id=-1,
+                    name=p["name"],
+                    volume=p.get("volume", 1.0),
+                    muted=p.get("muted", False),
+                    is_virtual=False,
+                    media_class=p.get("media_class", ""),
+                    node_ids=[],
+                    binary=p.get("binary", ""),
+                    display_name=p.get("display_name", p["name"]),
+                )
+                for p in self._persisted_inputs
+            ],
+            already_routed,
+            self,
+            title="Connect Source"
         )
         if not dialog.exec():
             return
@@ -332,24 +419,30 @@ class MainWindow(QMainWindow):
         if not selected:
             return
 
+        live_links     = self._pw.read_links()
+        output_widget  = self._output_widgets.get(output_name)
+        output_node_id = output_widget._device.id if output_widget else -1
+        input_widget   = self._input_widgets.get(selected.name)
+        connected = False
+        if output_node_id != -1 and input_widget:
+            connected = any(
+                (inp_id, output_node_id) in live_links
+                for inp_id in input_widget._device.node_ids
+            )
+
         for p in self._persisted_outputs:
             if p["name"] == output_name:
-                live_links     = self._pw.read_links()
-                output_node_id = self._output_widgets[output_name]._device.id
-                connected = any(
-                    (inp_id, output_node_id) in live_links
-                    for inp_id in selected.node_ids
-                ) if output_node_id != -1 else False
                 p.setdefault("routes", []).append({
                     "input_name": selected.name,
                     "connected":  connected,
                 })
                 break
 
-        output_widget = self._output_widgets.get(output_name)
         if output_widget:
             display_name = self._input_display_name(selected.name)
-            output_widget.add_route(selected.name, display_name, connected=connected)
+            available    = selected.name in self._input_widgets
+            icon_name    = self._input_icon_name(selected.name)
+            output_widget.add_route(selected.name, display_name, connected=connected, available=available, icon_name=icon_name)
 
         self._save()
 
@@ -370,10 +463,9 @@ class MainWindow(QMainWindow):
             return
 
         output_node_id = output_widget._device.id
-        input_node_ids = input_widget._device.node_ids
         live_links     = self._pw.read_links()
 
-        for inp_id in input_node_ids:
+        for inp_id in input_widget._device.node_ids:
             link_id = live_links.get((inp_id, output_node_id))
             input_node_name = next(
                 (
@@ -437,16 +529,23 @@ class MainWindow(QMainWindow):
 
         for nid in stream.node_ids:
             link_id = live_links.get((nid, output_node_id))
-            if link_id is not None:
-                try:
-                    self._pw.set_link_passive(link_id, not connect)
-                except RuntimeError:
-                    pass
-            elif connect:
-                try:
-                    self._pw.connect_nodes(stream_name, stream.id, output_name, output_node_id)
-                except RuntimeError:
-                    pass
+            if connect:
+                if link_id is not None:
+                    try:
+                        self._pw.set_link_passive(link_id, False)
+                    except RuntimeError:
+                        pass
+                else:
+                    try:
+                        self._pw.connect_nodes(stream_name, stream.id, output_name, output_node_id)
+                    except RuntimeError:
+                        pass
+            else:
+                if link_id is not None:
+                    try:
+                        self._pw.disconnect_nodes(stream_name, output_name)
+                    except RuntimeError:
+                        pass
 
         self._save()
 
@@ -472,8 +571,7 @@ class MainWindow(QMainWindow):
                     if stream.name in manually_on:
                         continue
                     for nid in stream.node_ids:
-                        link_id = live_links.get((nid, output_node_id))
-                        if link_id is not None:
+                        if (nid, output_node_id) in live_links:
                             try:
                                 self._pw.disconnect_nodes(stream.name, p["name"])
                             except RuntimeError:
@@ -553,6 +651,13 @@ class MainWindow(QMainWindow):
         ]
         if name in self._input_widgets:
             self._input_widgets.pop(name).deleteLater()
+
+        for p in self._persisted_outputs:
+            p["routes"] = [r for r in p.get("routes", []) if r["input_name"] != name]
+            widget = self._output_widgets.get(p["name"])
+            if widget:
+                widget.remove_route(name)
+
         self._save()
 
     def _remove_output(self, name: str):
@@ -574,6 +679,10 @@ class MainWindow(QMainWindow):
             if p["name"] == internal_name:
                 p["display_name"] = new_display_name
                 break
+
+        for output_widget in self._output_widgets.values():
+            output_widget.update_route_display_name(internal_name, new_display_name)
+
         self._save()
 
     def _rename_output(self, internal_name: str, new_display_name: str):
@@ -588,43 +697,23 @@ class MainWindow(QMainWindow):
                 break
         self._save()
 
+    def _on_collapsed_toggled(self, output_name: str, expanded: bool):
+        for p in self._persisted_outputs:
+            if p["name"] == output_name:
+                p["routes_expanded"] = expanded
+                break
+        self._save()
+
     def _save(self):
-        inputs_to_save = [
-            Input(
-                id=-1,
-                name=p["name"],
-                volume=p.get("volume", 1.0),
-                muted=p.get("muted", False),
-                is_virtual=False,
-                media_class="",
-                node_ids=[],
-                binary=p.get("binary", ""),
-                display_name=p.get("display_name", p["name"]),
-            )
-            for p in self._persisted_inputs
-        ]
-        outputs_to_save = [
-            Output(
-                id=-1,
-                name=p["name"],
-                display_name=p.get("display_name", p["name"]),
-                volume=p.get("volume", 1.0),
-                muted=p.get("muted", False),
-                is_virtual=p.get("is_virtual", False),
-                module_id=p.get("module_id"),
-                auto_route=p.get("auto_route", False),
-                routes=[
-                    Link(input_name=r["input_name"])
-                    for r in p.get("routes", [])
-                ],
-            )
-            for p in self._persisted_outputs
-        ]
-        store.save(inputs_to_save, outputs_to_save)
+        store.save(
+            [dict(p) for p in self._persisted_inputs],
+            [dict(p) for p in self._persisted_outputs],
+        )
 
     def _restart_pipewire(self):
         subprocess.run(["systemctl", "--user", "restart", "pipewire"], timeout=5)
 
     def closeEvent(self, event):
+        self._settings.setValue("window/geometry", self.saveGeometry())
         self._monitor.stop()
         event.accept()

@@ -1,34 +1,81 @@
 from PySide6.QtCore import Signal, Qt, QTimer, QEvent
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QPainter, QFontMetrics
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication,
-    QSlider, QPushButton, QCheckBox, QFrame, QLineEdit
+    QSlider, QPushButton, QCheckBox, QFrame, QLineEdit, QSizePolicy
 )
 from models import Device, Input, Output, Link
 
 
-class RouteRow(QWidget):
-    toggled  = Signal(str, bool)
-    removed  = Signal(str)
+class ElidingLabel(QLabel):
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
 
-    def __init__(self, input_name: str, display_name: str, connected: bool, parent=None):
+    def setText(self, text: str):
+        self._full_text = text
+        super().setText(text)
+        self.update()
+
+    def full_text(self) -> str:
+        return self._full_text
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        fm = QFontMetrics(self.font())
+        elided = fm.elidedText(self._full_text, Qt.ElideRight, self.width())
+        style = self.style()
+        opt = self.viewOptions() if hasattr(self, 'viewOptions') else None
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(self.rect(), self.alignment() or Qt.AlignLeft | Qt.AlignVCenter, elided)
+        painter.end()
+
+
+class RouteRow(QWidget):
+    toggled = Signal(str, bool)
+    removed = Signal(str)
+
+    def __init__(self, input_name: str, display_name: str, connected: bool, available: bool, icon_name: str = "", parent=None):
         super().__init__(parent)
         self._input_name = input_name
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(self)
+        frame.setObjectName("route_row")
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 2, 0, 2)
+        outer.addWidget(frame)
+
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(8, 4, 4, 4)
+
+        if icon_name:
+            icon = QIcon.fromTheme(icon_name)
+            if not icon.isNull():
+                icon_label = QLabel()
+                icon_label.setPixmap(icon.pixmap(16, 16))
+                icon_label.setFixedSize(16, 16)
+                layout.addWidget(icon_label)
 
         self._label = QLabel(display_name)
+        self._label.setObjectName("unavailable" if not available else "available")
 
         self._toggle = QPushButton("On" if connected else "Off")
+        self._toggle.setObjectName("toggle_btn")
         self._toggle.setCheckable(True)
         self._toggle.setChecked(connected)
-        self._toggle.setFixedWidth(36)
+        self._toggle.setStyleSheet("""
+            QPushButton { background:#45475a; color:#cdd6f4; border:none; border-radius:6px; padding:5px 8px; }
+            QPushButton:checked { background:#89b4fa; color:#1e1e2e; border:none; }
+            QPushButton:hover { background:#585b70; }
+            QPushButton:checked:hover { background:#74c7ec; }
+        """)
         self._toggle.toggled.connect(self._on_toggle)
 
         self._remove_btn = QPushButton("✕")
-        self._remove_btn.setFixedWidth(24)
-        self._remove_btn.setFlat(True)
+        self._remove_btn.setObjectName("remove_btn")
+        self._remove_btn.setFixedSize(24, 24)
         self._remove_btn.clicked.connect(lambda: self.removed.emit(self._input_name))
 
         layout.addWidget(self._label)
@@ -46,6 +93,13 @@ class RouteRow(QWidget):
         self._toggle.setText("On" if connected else "Off")
         self._toggle.blockSignals(False)
 
+    def set_available(self, available: bool):
+        self._label.setObjectName("unavailable" if not available else "available")
+        self._label.setStyle(self._label.style())
+
+    def set_display_name(self, name: str):
+        self._label.setText(name)
+
 
 class StreamRow(QWidget):
     toggled = Signal(str, bool)
@@ -54,15 +108,27 @@ class StreamRow(QWidget):
         super().__init__(parent)
         self._stream_name = stream_name
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        frame = QFrame(self)
+        frame.setObjectName("route_row")
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 2, 0, 2)
+        outer.addWidget(frame)
+
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(8, 4, 4, 4)
 
         self._label = QLabel(display_name)
 
         self._toggle = QPushButton("On" if connected else "Off")
+        self._toggle.setObjectName("toggle_btn")
         self._toggle.setCheckable(True)
         self._toggle.setChecked(connected)
-        self._toggle.setFixedWidth(36)
+        self._toggle.setStyleSheet("""
+            QPushButton { background:#45475a; color:#cdd6f4; border:none; border-radius:6px; padding:5px 8px; }
+            QPushButton:checked { background:#89b4fa; color:#1e1e2e; border:none; }
+            QPushButton:hover { background:#585b70; }
+            QPushButton:checked:hover { background:#74c7ec; }
+        """)
         self._toggle.toggled.connect(self._on_toggle)
 
         layout.addWidget(self._label)
@@ -89,18 +155,20 @@ class DeviceWidget(QWidget):
     route_removed       = Signal(str, str)
     stream_toggled      = Signal(str, str, bool)
     remove_requested    = Signal(str)
+    collapsed_toggled   = Signal(str, bool)
     rename_requested    = Signal(str, str)
 
-    def __init__(self, device: Device, parent=None):
+    def __init__(self, device: Device, routes_expanded: bool = True, parent=None):
         super().__init__(parent)
-        self._device        = device
+        self._device         = device
         self._persisted_name = device.name
-        self._dragging      = False
-        self._cooling_down  = False
+        self._dragging       = False
+        self._cooling_down   = False
         self._pending_volume = device.volume
-        self._is_output     = isinstance(device, Output)
-        self._route_rows:   dict[str, RouteRow]  = {}
-        self._stream_rows:  dict[str, StreamRow] = {}
+        self._is_output      = isinstance(device, Output)
+        self._route_rows:    dict[str, RouteRow]  = {}
+        self._stream_rows:   dict[str, StreamRow] = {}
+        self._routes_expanded = routes_expanded
 
         self._volume_timer = QTimer()
         self._volume_timer.setSingleShot(True)
@@ -110,38 +178,29 @@ class DeviceWidget(QWidget):
         self._build()
 
     def _build(self):
-        self.setAutoFillBackground(True)
-        self.setStyleSheet("""
-            DeviceWidget {
-                border: 1px solid palette(mid);
-                border-radius: 4px;
-            }
-        """)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 8, 8, 8)
-        inner_widget = QWidget()
-        inner_widget.setObjectName("card")
-        inner_widget.setStyleSheet("""
-            QWidget#card {
-                border: 1px solid palette(mid);
-                border-radius: 4px;
-                background-color: palette(base);
-            }
-        """)
-        layout = QVBoxLayout(inner_widget)
-        layout.setAlignment(Qt.AlignTop)
-        outer.addWidget(inner_widget)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(4, 4, 4, 4)
+        outer_layout.setSpacing(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        self._card = QFrame()
+        self._card.setObjectName("card")
+        outer_layout.addWidget(self._card)
+
+        layout = QVBoxLayout(self._card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
 
         header = QHBoxLayout()
+        header.setSpacing(8)
 
         self._icon_label = QLabel()
         self._icon_label.setFixedSize(20, 20)
-        header.addWidget(self._icon_label)
         self._update_icon(getattr(self._device, 'icon_name', ''))
+        header.addWidget(self._icon_label)
 
         display = getattr(self._device, 'display_name', '') or self._device.name
-        self._label = QLabel(display)
-        self._label.setAlignment(Qt.AlignLeft)
+        self._label = ElidingLabel(display)
         self._label.mouseDoubleClickEvent = self._on_label_double_click
 
         self._rename_edit = QLineEdit()
@@ -150,8 +209,8 @@ class DeviceWidget(QWidget):
         self._rename_edit.editingFinished.connect(self._on_rename_confirm)
 
         self._remove_btn = QPushButton("✕")
-        self._remove_btn.setFixedWidth(24)
-        self._remove_btn.setFlat(True)
+        self._remove_btn.setObjectName("remove_btn")
+        self._remove_btn.setFixedSize(24, 24)
         self._remove_btn.clicked.connect(lambda: self.remove_requested.emit(self._persisted_name))
 
         header.addWidget(self._label)
@@ -160,6 +219,7 @@ class DeviceWidget(QWidget):
         layout.addLayout(header)
 
         slider_row = QHBoxLayout()
+        slider_row.setSpacing(8)
         self._slider = QSlider(Qt.Horizontal)
         self._slider.setRange(0, 150)
         self._slider.setValue(int(self._device.volume * 100))
@@ -168,12 +228,12 @@ class DeviceWidget(QWidget):
         self._slider.valueChanged.connect(self._on_volume)
 
         self._vol_label = QLabel(f"{int(self._device.volume * 100)}%")
-        self._vol_label.setFixedWidth(36)
+        self._vol_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self._mute_btn = QPushButton("Mute")
+        self._mute_btn.setObjectName("mute_btn")
         self._mute_btn.setCheckable(True)
         self._mute_btn.setChecked(self._device.muted)
-        self._mute_btn.setFixedWidth(48)
         self._mute_btn.toggled.connect(self._on_mute)
 
         slider_row.addWidget(self._slider)
@@ -183,36 +243,73 @@ class DeviceWidget(QWidget):
 
         if self._is_output:
             sep1 = QFrame()
+            sep1.setObjectName("separator")
             sep1.setFrameShape(QFrame.HLine)
             layout.addWidget(sep1)
 
-            self._routes_label = QLabel("Inputs")
-            layout.addWidget(self._routes_label)
+            routes_header = QHBoxLayout()
+            routes_header.setSpacing(4)
 
-            self._routes_layout = QVBoxLayout()
-            layout.addLayout(self._routes_layout)
+            self._routes_collapse_btn = QPushButton("Sources")
+            self._routes_collapse_btn.setObjectName("flat_btn")
+            self._routes_collapse_btn.setFlat(True)
+            self._routes_collapse_btn.clicked.connect(self._toggle_routes_collapsed)
 
-            add_route_btn = QPushButton("+ Add route")
-            add_route_btn.setFlat(True)
-            add_route_btn.clicked.connect(
+            self._connect_source_btn = QPushButton("Connect source")
+            self._connect_source_btn.setObjectName("add_btn")
+            self._connect_source_btn.clicked.connect(
                 lambda: self.route_add_requested.emit(self._persisted_name)
             )
-            layout.addWidget(add_route_btn)
+
+            routes_header.addWidget(self._routes_collapse_btn)
+            routes_header.addStretch()
+            routes_header.addWidget(self._connect_source_btn)
+            layout.addLayout(routes_header)
+
+            self._routes_container = QWidget()
+            self._routes_container.setStyleSheet("background: transparent;")
+            self._routes_layout = QVBoxLayout(self._routes_container)
+            self._routes_layout.setContentsMargins(0, 0, 0, 0)
+            self._routes_layout.setSpacing(2)
+            self._routes_container.setVisible(self._routes_expanded)
+            layout.addWidget(self._routes_container)
 
             sep2 = QFrame()
+            sep2.setObjectName("separator")
             sep2.setFrameShape(QFrame.HLine)
             layout.addWidget(sep2)
 
+            auto_route_row = QHBoxLayout()
             self._auto_route = QCheckBox("Route all apps")
             self._auto_route.setChecked(self._device.auto_route)
             self._auto_route.toggled.connect(self._on_auto_route)
-            layout.addWidget(self._auto_route)
+            auto_route_row.addWidget(self._auto_route)
+            auto_route_row.addStretch()
+            layout.addLayout(auto_route_row)
 
             self._streams_container = QWidget()
+            self._streams_container.setStyleSheet("background: transparent;")
             self._streams_layout = QVBoxLayout(self._streams_container)
             self._streams_layout.setContentsMargins(0, 0, 0, 0)
+            self._streams_layout.setSpacing(2)
             self._streams_container.setVisible(self._device.auto_route)
             layout.addWidget(self._streams_container)
+
+            self._update_routes_header()
+
+    def _toggle_routes_collapsed(self):
+        if not self._route_rows:
+            return
+        self._routes_expanded = not self._routes_expanded
+        self._routes_container.setVisible(self._routes_expanded)
+        self._routes_container.updateGeometry()
+        self._update_routes_header()
+        self.collapsed_toggled.emit(self._persisted_name, self._routes_expanded)
+
+    def _update_routes_header(self):
+        count = len(self._route_rows)
+        arrow = "▾" if self._routes_expanded else "▸"
+        self._routes_collapse_btn.setText(f"{arrow} Sources ({count})")
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.MouseButtonPress:
@@ -226,7 +323,7 @@ class DeviceWidget(QWidget):
 
     def _on_label_double_click(self, event):
         self._label.hide()
-        self._rename_edit.setText(self._label.text())
+        self._rename_edit.setText(self._label.full_text())
         self._rename_edit.show()
         self._rename_edit.setFocus()
         self._rename_edit.selectAll()
@@ -237,7 +334,6 @@ class DeviceWidget(QWidget):
             return
 
         QApplication.instance().removeEventFilter(self)
-
         new_name = self._rename_edit.text().strip()
 
         self._rename_edit.hide()
@@ -248,9 +344,9 @@ class DeviceWidget(QWidget):
                 return
             new_name = self._device.display_name or self._device.name
 
+        self._full_display_name = new_name
         self._label.setText(new_name)
         self.rename_requested.emit(self._persisted_name, new_name)
-
     def _on_volume(self, value: int):
         self._pending_volume = value / 100
         self._vol_label.setText(f"{value}%")
@@ -270,11 +366,12 @@ class DeviceWidget(QWidget):
         self._streams_container.setVisible(checked)
         self.auto_route_toggled.emit(self._device.id, checked)
 
-    def set_available(self, available: bool):
-        color = "red" if not available else ""
-        self._label.setStyleSheet(f"color: {color};")
-        self._slider.setEnabled(available)
-        self._mute_btn.setEnabled(available)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_label') and hasattr(self, '_full_display_name'):
+            fm = self._label.fontMetrics()
+            elided = fm.elidedText(self._full_display_name, Qt.ElideRight, self._label.width())
+            self._label.setText(elided)
 
     def _update_icon(self, icon_name: str):
         if icon_name:
@@ -283,6 +380,12 @@ class DeviceWidget(QWidget):
                 self._icon_label.setPixmap(icon.pixmap(20, 20))
                 return
         self._icon_label.clear()
+
+    def set_available(self, available: bool):
+        self._label.setObjectName("unavailable" if not available else "available")
+        self._label.setStyle(self._label.style())
+        self._slider.setEnabled(available)
+        self._mute_btn.setEnabled(available)
 
     def refresh(self, device: Device):
         if self._dragging or self._cooling_down:
@@ -297,10 +400,10 @@ class DeviceWidget(QWidget):
         self._mute_btn.setChecked(device.muted)
         self._mute_btn.blockSignals(False)
 
-    def add_route(self, input_name: str, display_name: str, connected: bool):
+    def add_route(self, input_name: str, display_name: str, connected: bool, available: bool = False, icon_name: str = ""):
         if input_name in self._route_rows:
             return
-        row = RouteRow(input_name, display_name, connected)
+        row = RouteRow(input_name, display_name, connected, available, icon_name)
         row.toggled.connect(
             lambda name, state: self.route_toggled.emit(self._persisted_name, name, state)
         )
@@ -309,16 +412,30 @@ class DeviceWidget(QWidget):
         )
         self._routes_layout.addWidget(row)
         self._route_rows[input_name] = row
+        if not self._routes_expanded:
+            self._routes_expanded = True
+        self._routes_container.setVisible(self._routes_expanded)
+        self._routes_container.updateGeometry()
+        self._update_routes_header()
 
     def remove_route(self, input_name: str):
         row = self._route_rows.pop(input_name, None)
         if row:
             row.setParent(None)
+        if not self._route_rows:
+            self._routes_expanded = False
+            self._routes_container.setVisible(False)
+        self._update_routes_header()
 
-    def update_route_state(self, input_name: str, connected: bool):
+    def update_route_availability(self, input_name: str, available: bool):
         row = self._route_rows.get(input_name)
         if row:
-            row.set_connected(connected)
+            row.set_available(available)
+
+    def update_route_display_name(self, input_name: str, display_name: str):
+        row = self._route_rows.get(input_name)
+        if row:
+            row.set_display_name(display_name)
 
     def update_streams(self, streams: list, stream_states: dict[str, bool]):
         for name in list(self._stream_rows):

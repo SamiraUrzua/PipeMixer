@@ -201,7 +201,8 @@ class PipewireManager:
             vol_props    = obj.get("info", {}).get("params", {}).get("Props", [{}])[0]
             node_id      = obj["id"]
             stream_name  = props.get("node.name", "")
-            display_name = props.get("media.name") or props.get("node.description") or f"{client_name} ({binary})"
+            media_name   = props.get("media.name", "")
+            display_name = f"{client_name} — {media_name}" if media_name and media_name.lower() != "playback" else (client_name or binary or stream_name)
 
             streams.append(Input(
                 id=node_id,
