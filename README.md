@@ -2,6 +2,10 @@
 
 PipeMixer is a PipeWire audio mixer for Linux. It lets you route audio sources to outputs, create virtual microphones, and control volumes — all without interfering with your normal system audio setup. Open it when you need it, close it when you don't.
 
+## Preview
+
+![PipeMixer UI](assets/PipeMixer.png)
+
 ## Features
 
 - **Source management** — add hardware inputs and app streams as sources with volume and mute control
